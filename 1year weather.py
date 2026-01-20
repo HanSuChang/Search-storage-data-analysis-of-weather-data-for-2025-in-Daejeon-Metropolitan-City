@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from datetime import datetime
+
 import numpy as np
 import pandas as pd
 
@@ -161,28 +162,93 @@ class WeatherGUI(tk.Toplevel):
 
         self.log("프로그램 시작")
 
-    # -------------------- 메뉴 구성 --------------------
+    # -------------------- 메뉴 구성 (수정됨) --------------------
     def setup_menu(self):
         menubar = tk.Menu(self)
 
-        # 데이터 수정 메뉴 추가
+        # 1. 데이터 수정 메뉴
         edit_data_menu = tk.Menu(menubar, tearoff=0)
-        # 열 삭제 기능을 호출 (명령어: self.popup_delete_column)
         edit_data_menu.add_command(label="열 삭제", command=self.popup_delete_column)
         menubar.add_cascade(label="데이터 수정", menu=edit_data_menu)
 
+        # 2. 데이터 분석 메뉴
         analysis_menu = tk.Menu(menubar, tearoff=0)
         analysis_menu.add_command(label="전체 요약 통계량", command=self.show_summary_stats)
         analysis_menu.add_command(label="1~12월 주요항목 평균치", command=self.show_monthly_summary)
         menubar.add_cascade(label="데이터 분석", menu=analysis_menu)
 
-        edit_menu = tk.Menu(menubar, tearoff=0)
-        edit_menu.add_command(label="강수 발생일 기록 ", command=self.process_rainfall_frequency)
-        edit_menu.add_command(label="기온 탐색 결과", command=self.explore_avg_temp)
-        menubar.add_cascade(label="데이터 조회", menu=edit_menu)
+        # 3. 데이터 조회 메뉴
+        view_menu = tk.Menu(menubar, tearoff=0)
+        view_menu.add_command(label="강수 발생일 기록", command=self.process_rainfall_frequency)
+        view_menu.add_command(label="기온 탐색 결과", command=self.explore_avg_temp)
+        menubar.add_cascade(label="데이터 조회", menu=view_menu)
 
+        # 4. 이상치 제거 메뉴 (최대 풍속으로 변경) ★
+        outlier_menu = tk.Menu(menubar, tearoff=0)
+        outlier_menu.add_command(label="최대 풍속(m/s)", command=self.remove_wind_speed_outliers)
+        menubar.add_cascade(label="이상치 제거", menu=outlier_menu)
 
         self.config(menu=menubar)
+
+    # -------------------- 이상치 제거 기능 (최대 풍속 기준) ★ --------------------
+    def remove_wind_speed_outliers(self):
+        """IQR 방식을 이용해 최대 풍속(m/s)의 이상치를 제거합니다."""
+        if self.df_current is None:
+            messagebox.showwarning("알림", "데이터가 로드되지 않았습니다.")
+            return
+
+        # 컬럼명 설정 (파일의 실제 컬럼명과 일치해야 합니다)
+        col = "최대 풍속(m/s)"
+        if col not in self.df_current.columns:
+            messagebox.showerror("오류", f"'{col}' 컬럼을 찾을 수 없습니다.\n파일에 해당 컬럼이 있는지 확인하세요.")
+            return
+
+        try:
+            df = self.df_current.copy()
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+            valid_data = df[col].dropna()
+            if valid_data.empty:
+                messagebox.showinfo("알림", "분석할 유효한 데이터가 없습니다.")
+                return
+
+            # IQR 계산
+            Q1 = valid_data.quantile(0.25)
+            Q3 = valid_data.quantile(0.75)
+            IQR = Q3 - Q1
+
+            # 이상치 경계 설정 (1.5배)
+            lower_bound = Q1 - 1.5 * IQR
+            upper_bound = Q3 + 1.5 * IQR
+
+            # 물리적 한계 보정 (풍속은 0 미만일 수 없음)
+            lower_bound = max(lower_bound, 0)
+
+            # 필터링 수행
+            before_cnt = len(df)
+            filtered_df = df[(df[col] >= lower_bound) & (df[col] <= upper_bound)]
+            after_cnt = len(filtered_df)
+
+            removed_cnt = before_cnt - after_cnt
+
+            if removed_cnt == 0:
+                messagebox.showinfo("결과", f"통계적 기준({upper_bound:.2f} m/s 초과)을 벗어나는 이상치가 발견되지 않았습니다.")
+                return
+
+            if messagebox.askyesno("이상치 제거 확인",
+                                   f"계산된 정상 범위: {lower_bound:.2f} ~ {upper_bound:.2f} m/s\n"
+                                   f"제거될 데이터 수: {removed_cnt}개\n\n"
+                                   f"이 작업을 수행하시겠습니까?"):
+                self.df_current = filtered_df
+                self.df_base = filtered_df.copy()
+
+                self.render_table(self.df_current)
+                self.log(f"이상치 제거 완료: {col} ({removed_cnt}행 삭제)")
+                messagebox.showinfo("완료", f"{removed_cnt}개의 이상치가 제거되었습니다.")
+
+        except Exception as e:
+            messagebox.showerror("오류", f"이상치 제거 중 오류 발생: {e}")
+            self.log(f"이상치 제거 실패: {e}")
 
     # -------------------- 공통 --------------------
     def log(self, msg: str):
@@ -401,30 +467,39 @@ class WeatherGUI(tk.Toplevel):
 
             df["dt"] = pd.to_datetime(df["일시"], errors="coerce")
             df = df.dropna(subset=["dt"])
-            df["월"] = df["dt"].dt.month
+            # 월(month) 정보는 더 이상 분류 기준에 필요 없으므로 생략하거나 유지해도 무방합니다.
             df["평균기온(°C)"] = pd.to_numeric(df["평균기온(°C)"], errors="coerce")
 
             def get_stat(row):
-                m, t = row["월"], row["평균기온(°C)"]
+                t = row["평균기온(°C)"]
                 if pd.isna(t):
                     return None
-                if m in [3, 4, 5, 9, 10, 11]:
-                    if t >= 20:
-                        return "덥다"
-                    if t <= 10:
-                        return "춥다"
-                elif m in [6, 7, 8] and t >= 25:
-                    return "매우 덥다"
-                elif m in [12, 1, 2] and t <= 0:
-                    return "매우 춥다"
-                return None
+
+                # 요청하신 새로운 기온 기준 적용
+                if t <= 0:
+                    return "매우 추움"
+                elif t <= 10:
+                    return "추움"
+                elif t <= 20:
+                    return "보통"
+                elif t <= 30:
+                    return "더움"
+                else:
+                    return "매우 더움"
 
             df["상태"] = df.apply(get_stat, axis=1)
+
+            # 상태가 분류된 데이터만 추출
             res = df[df["상태"].notnull()].copy()
             res["날짜"] = res["dt"].dt.date
+
+            # 결과 표시 (날짜, 기온, 상태 순)
             self.display_df_popup(res[["날짜", "평균기온(°C)", "상태"]], "기온 탐색 결과")
+
+            self.log(f"기온 탐색 완료: {len(res)}행 분류됨")
+
         except Exception as e:
-            messagebox.showerror("오류", str(e))
+            messagebox.showerror("오류", f"기온 탐색 중 오류 발생: {e}")
 
     # -------------------- 판단/상세보기/그래프 (사진 핵심) --------------------
     def apply_filter(self):
