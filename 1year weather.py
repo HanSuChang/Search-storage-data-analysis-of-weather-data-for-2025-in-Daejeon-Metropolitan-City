@@ -893,4 +893,4 @@ if __name__ == "__main__":
     root.withdraw()  # 뒤에 빈 창 안 보이게
     WeatherGUI(root)
     root.mainloop()
-#ㅇ
+#완성
